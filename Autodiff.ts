@@ -57,7 +57,8 @@ export type op =
         "*"  |
         "/"  |
         "^"  |
-        "ln";
+        "ln" |
+        "max"
 
 export const builtin: map<string, Function> = {
     "sin": (x: number) => Math.sin(x),
@@ -217,6 +218,29 @@ export class Accumulator {
     resetGradient() {
         this._gradient = 0;
     }
+
+    modifyVal(value: number, op: op) {
+        switch(op) {
+            case "+":
+                this._val += value;
+                break;
+            case "-":
+                this._val -= value;
+                break;
+            case "*":
+                this._val *= value;
+                break;
+            case "/":
+                this._val /= value;
+                break;
+            case "^":
+                this._val **= value;
+                break;
+            case "max":
+                this._val = builtin[op](this._val, value);
+                break;
+        }
+    }
 }
 
 const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -260,6 +284,77 @@ function $(strs: TemplateStringsArray, ...values: any[]) {
     }
     let os = output+strs[strs.length-1];
     return [os,kmap] as [string, map<string, any>];
+}
+export class Optimizer {
+    constructor() {}
+
+    static momentumCoef: number = 0.9;
+
+    static sgd(
+        grad: Operator, 
+        accumulators: Accumulator[], 
+        step: number = 1, 
+        lr: number = 0.01, 
+        maximise: boolean = false, 
+        momentum: number = 0,
+        dampening: number = 0,
+        nesterov: boolean = false
+    ) {
+        let velocity: map<string, number> = {};
+        let gmul = maximise ? -1 : 1
+        if (momentum > 0) {
+            for (let acc of accumulators) velocity[acc.binding] = 0;
+        }
+        for (let i = 0; i < step; i++) {
+            grad.backward();
+            for (let acc of accumulators) {
+                let gt = acc.gradient*gmul
+                if (momentum!==0) {
+                    if (dampening > 1) {
+                        velocity[acc.binding] = velocity[acc.binding]*momentum + (1-dampening)*gt;
+                    } else {
+                        velocity[acc.binding] = gt;
+                    }
+                    if (nesterov) {
+                        gt = gt + momentum*velocity[acc.binding]
+                    } else {
+                        gt = velocity[acc.binding];
+                    }
+                }
+                acc.modifyVal(gt*lr, "-")
+            }
+        }
+    }
+
+    /**
+     * Do not use Halley's method if the function contains max/min or other functions with non-trivial 2nd order derivative
+     */
+    static newton(
+        grad: Operator, 
+        accumulator: Accumulator, 
+        step: number = 1,
+        halley: boolean = false
+    ) {
+        let sdiff;
+        if (halley) {
+            sdiff = grad.diff([accumulator.binding])[accumulator.binding];
+        }
+
+        for (let i = 0; i < step; i++) {
+            grad.backward()
+            if (halley) {
+                let f = grad.val();
+                let fd = accumulator.gradient*accumulator.val();
+                sdiff.backward();
+                let fdd = accumulator.gradient*accumulator.val();
+
+                let modifier = (f*fd)/(fd**2-1/2*f*fdd)
+                accumulator.modifyVal(modifier, "-");
+            } else {
+                accumulator.modifyVal(grad.val()/(accumulator.gradient*accumulator.val()),"-")
+            }
+        }
+    }
 }
 
 export class Engine {
@@ -482,7 +577,63 @@ export class Engine {
                 let values: Child[] = this.values
                 return Math.log(values[0].val())
             }
-        }
+        },
+        "max": {
+            diff: function(sel: string[] = []){
+                throw new Error("The first order derivative of max() returns a non-differentiable function. Use forward or backward accumulation instead. If 2nd order differentiation is required, use softmax (soon)")
+            },
+            forward: function() {
+                //@ts-ignore
+                let values: Child[] = this.values
+                let v1 = values[0].val(), v2 = values[1].val();
+                if (v1 === v2) {
+                    return values[0].forward().elementWise(0.5, "*").merge(values[1].forward().elementWise(0.5, "*"),"+")
+                }
+                else if (v1 > v2) values[0].forward()
+                else return values[1].forward();
+            },
+            backward: function(grad: number = 1) {
+                //@ts-ignore
+                let values: Child[] = this.values
+                let v1 = values[0].val(), v2 = values[1].val();
+                if (v1 === v2) {values[0].backward(grad*0.5); values[1].backward(grad*0.5)}
+                else if (v1 > v2) values[0].backward(grad)
+                else values[1].backward(grad);
+            },
+            val: function(){
+                //@ts-ignore
+                let values: Child[] = this.values
+                return Math.max(values[0].val(), values[1].val())
+            }
+        },
+        "min": {
+            diff: function(sel: string[] = []){
+                throw new Error("The first order derivative of min() returns a non-differentiable function. Use forward or backward accumulation instead. If 2nd order differentiation is required, use softmin (soon)")
+            },
+            forward: function() {
+                //@ts-ignore
+                let values: Child[] = this.values
+                let v1 = values[0].val(), v2 = values[1].val();
+                if (v1 === v2) {
+                    return values[0].forward().elementWise(0.5, "*").merge(values[1].forward().elementWise(0.5, "*"),"+")
+                }
+                else if (v1 < v2) values[0].forward()
+                else return values[1].forward();
+            },
+            backward: function(grad: number = 1) {
+                //@ts-ignore
+                let values: Child[] = this.values
+                let v1 = values[0].val(), v2 = values[1].val();
+                if (v1 === v2) {values[0].backward(grad*0.5); values[1].backward(grad*0.5)}
+                else if (v1 < v2) values[0].backward(grad)
+                else values[1].backward(grad);
+            },
+            val: function(){
+                //@ts-ignore
+                let values: Child[] = this.values
+                return Math.min(values[0].val(), values[1].val())
+            }
+        },
     }
 
     static baseParam = {
