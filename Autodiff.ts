@@ -58,7 +58,8 @@ export type op =
         "/"  |
         "^"  |
         "ln" |
-        "max"
+        "max"|
+        "min"
 
 export const builtin: map<string, Function> = {
     "sin": (x: number) => Math.sin(x),
@@ -237,6 +238,7 @@ export class Accumulator {
                 this._val **= value;
                 break;
             case "max":
+            case "min":
                 this._val = builtin[op](this._val, value);
                 break;
         }
